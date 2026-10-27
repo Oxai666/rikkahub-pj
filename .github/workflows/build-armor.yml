@@ -1,0 +1,94 @@
+name: build-armor-apk
+
+# 用法（全程手机可完成）：
+#   1. 仓库根目录放 armor-ci.tar.gz（4 个 .kt + patch.py）
+#   2. 把本文件放到 .github/workflows/build-armor.yml
+#   3. Actions → build-armor-apk → Run workflow → 等 20~40 分钟 → 下载 artifact
+#
+# 本 workflow 自己会去上游拉 3.1.1 的源码，不依赖你 fork 里有没有那个 tag，
+# 所以 fork 时勾「Copy the master branch only」也没问题。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout upstream 3.1.1
+        uses: actions/checkout@v4
+        with:
+          repository: rikkahub/rikkahub
+          ref: 3.1.1
+
+      - name: Fetch armor payload from this fork
+        run: |
+          set -e
+          URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/armor-ci.tar.gz"
+          echo "fetch $URL"
+          curl -fsSL --retry 3 --retry-delay 3 -o /tmp/armor-ci.tar.gz "$URL"
+          ls -l /tmp/armor-ci.tar.gz
+          tar tzf /tmp/armor-ci.tar.gz
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Android SDK components
+        run: |
+          set -e
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+
+          # build-logic 里 compileSdk = 37，平台包必须有
+          sdkmanager "platforms;android-37"
+
+          # build-tools 取能装到的最新 37.x
+          BT=$(sdkmanager --list 2>/dev/null | grep -oE "build-tools;3[7-9][0-9]*\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1)
+          if [ -z "$BT" ]; then
+            BT=$(sdkmanager --list 2>/dev/null | grep -oE "build-tools;3[0-9]\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1)
+          fi
+          echo "build-tools => $BT"
+          sdkmanager "build-tools;$BT"
+
+          # terminal / workspace 两个模块声明了 cmake 3.22.1
+          sdkmanager "cmake;3.22.1"
+
+          # NDK 取最新可用版本并写进 gradle.properties，
+          # 否则 AGP 会去找一个没安装的默认版本
+          NDK=$(sdkmanager --list 2>/dev/null | grep -oE "ndk;[0-9.]+" | sed 's/ndk;//' | sort -V | tail -1)
+          echo "ndk => $NDK"
+          sdkmanager "ndk;$NDK"
+          echo "android.ndkVersion=$NDK" >> gradle.properties
+
+      - name: Apply armor patch
+        run: |
+          set -e
+          mkdir -p app/src/main/java/me/rerere/rikkahub/data/ai/armor
+          tar xzf /tmp/armor-ci.tar.gz -C app/src/main/java/me/rerere/rikkahub/data/ai/armor
+          python3 app/src/main/java/me/rerere/rikkahub/data/ai/armor/patch.py
+          rm -f app/src/main/java/me/rerere/rikkahub/data/ai/armor/patch.py
+          echo "--- 确认改动落位 ---"
+          grep -n "ArmorTransformer" app/src/main/java/me/rerere/rikkahub/data/ai/ChatRequestFactory.kt
+          grep -n "ArmorProvider" app/src/main/java/me/rerere/rikkahub/service/ChatService.kt
+
+      - name: Build debug APK
+        run: |
+          set -e
+          chmod +x gradlew
+          ./gradlew :app:assembleGithubDebug \
+            --no-daemon \
+            --no-configuration-cache \
+            --stacktrace \
+            --warning-mode summary
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: rikkahub-armor-debug
+          path: app/build/outputs/apk/github/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
