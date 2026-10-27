@@ -14,6 +14,7 @@ jobs:
         with:
           repository: rikkahub/rikkahub
           ref: 3.1.1
+          submodules: recursive
 
       - name: Fetch armor payload from this fork
         run: |
@@ -28,10 +29,6 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      # 不用 android-actions/setup-android：它内部会 sdkmanager tools，而 tools 包已下架。
-      # 直接用 runner 预装的 cmdline-tools。
-      # app 模块要 platforms;android-37.2（compileSdk 37 + minorApiLevel 2）
-      # library 模块要 platforms;android-37（canary，需 --channel=3）
       - name: Install SDK packages
         run: |
           set -x
@@ -69,8 +66,6 @@ jobs:
           fi
           grep -n "compileSdk" build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt || true
 
-      # 上游仓库不含 google-services.json（属于作者私有 Firebase 配置），
-      # 用一个最小占位让 google-services 插件能生成资源；运行期 analytics 静默失败，不影响主功能。
       - name: Stub google-services.json
         run: |
           set -e
@@ -90,18 +85,24 @@ jobs:
           grep -n "ArmorTransformer" app/src/main/java/me/rerere/rikkahub/data/ai/ChatRequestFactory.kt
           grep -n "ArmorProvider" app/src/main/java/me/rerere/rikkahub/service/ChatService.kt
 
-      # web 模块的 preBuild 会调 web-ui 的 `pnpm run build`，runner 没装 pnpm
-      - name: Setup Node and pnpm
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web-ui/pnpm-lock.yaml
 
       - name: Install web-ui dependencies
         working-directory: web-ui
         run: |
           set -e
-          npm i -g pnpm@9
           pnpm --version
+          node --version
           pnpm install --frozen-lockfile
 
       - name: Build debug APK
