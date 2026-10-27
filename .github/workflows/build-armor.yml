@@ -77,13 +77,29 @@ jobs:
       - name: Apply armor patch
         run: |
           set -e
-          mkdir -p app/src/main/java/me/rerere/rikkahub/data/ai/armor
-          tar xzf /tmp/armor-ci.tar.gz -C app/src/main/java/me/rerere/rikkahub/data/ai/armor
-          python3 app/src/main/java/me/rerere/rikkahub/data/ai/armor/patch.py
-          rm -f app/src/main/java/me/rerere/rikkahub/data/ai/armor/patch.py
+          rm -rf /tmp/armor-src && mkdir -p /tmp/armor-src
+          tar xzf /tmp/armor-ci.tar.gz -C /tmp/armor-src
+
+          MAIN_DIR=app/src/main/java/me/rerere/rikkahub/data/ai/armor
+          TEST_DIR=app/src/test/java/me/rerere/rikkahub/data/ai/armor
+          mkdir -p "$MAIN_DIR" "$TEST_DIR"
+
+          cp /tmp/armor-src/ArmorState.kt /tmp/armor-src/ArmorJudge.kt /tmp/armor-src/ArmorProvider.kt /tmp/armor-src/ArmorTransformer.kt "$MAIN_DIR/"
+          cp /tmp/armor-src/patch.py .
+          if ls /tmp/armor-src/*Test.kt >/dev/null 2>&1; then
+            cp /tmp/armor-src/*Test.kt "$TEST_DIR/"
+          else
+            echo "（包内无测试文件）"
+          fi
+
+          python3 patch.py
+          rm -f patch.py
+
           echo "--- 确认改动落位 ---"
           grep -n "ArmorTransformer" app/src/main/java/me/rerere/rikkahub/data/ai/ChatRequestFactory.kt
           grep -n "ArmorProvider" app/src/main/java/me/rerere/rikkahub/service/ChatService.kt
+          echo "--- 测试文件 ---"
+          ls -l "$TEST_DIR" || true
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -104,6 +120,26 @@ jobs:
           pnpm --version
           node --version
           pnpm install --frozen-lockfile
+
+      # 先跑单测：判定逻辑错了的话，APK 打出来也是废的，早红早改
+      - name: Unit tests (armor)
+        run: |
+          set -e
+          chmod +x gradlew
+          ./gradlew :app:testGithubDebugUnitTest \
+            --tests "me.rerere.rikkahub.data.ai.armor.*" \
+            --no-daemon \
+            --no-configuration-cache \
+            --stacktrace
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: armor-test-report
+          path: app/build/reports/tests/testGithubDebugUnitTest/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Build debug APK
         run: |
