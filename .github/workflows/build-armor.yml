@@ -19,7 +19,6 @@ jobs:
         run: |
           set -e
           URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/armor-ci.tar.gz"
-          echo "fetch $URL"
           curl -fsSL --retry 3 --retry-delay 3 -o /tmp/armor-ci.tar.gz "$URL"
           ls -l /tmp/armor-ci.tar.gz
 
@@ -29,38 +28,46 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          log-accepted-android-sdk-licenses: true
-
-      # app 模块：compileSdk { version = release(37) { minorApiLevel = 2 } } → platforms;android-37.2
-      # library 模块：compileSdk = 37 → 需要 platforms;android-37（canary，得用 --channel=3）
+      # 不用 android-actions/setup-android：它内部会 sdkmanager tools，而 tools 包已下架。
+      # 直接用 runner 预装的 cmdline-tools。
+      # app 模块要 platforms;android-37.2（compileSdk 37 + minorApiLevel 2）
+      # library 模块要 platforms;android-37（canary，需 --channel=3）
       - name: Install SDK packages
         run: |
           set -x
-          sdkmanager "platforms;android-37.2"
-          sdkmanager "build-tools;37.0.0"
-          sdkmanager "cmake;3.22.1"
-          sdkmanager "ndk;29.0.14206865"
-          sdkmanager --channel=3 "platforms;android-37" || true
-          echo "--- platforms 目录 ---"
-          ls "$ANDROID_SDK_ROOT/platforms" || true
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKM" ]; then
+            SDKM=$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
+          fi
+          echo "SDK=$SDK"
+          echo "SDKM=$SDKM"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
 
-      # canary 平台装不上时，把 library 模块的 compileSdk 降到 36，保证能编
-      - name: Fallback for library compileSdk
+          "$SDKM" "platforms;android-37.2"
+          "$SDKM" "build-tools;37.0.0"
+          "$SDKM" "cmake;3.22.1"
+          "$SDKM" "ndk;29.0.14206865"
+          "$SDKM" --channel=3 "platforms;android-37" || true
+          echo "--- platforms ---"
+          ls "$SDK/platforms" || true
+          echo "--- ndk ---"
+          ls "$SDK/ndk" || true
+
+      - name: Prepare gradle properties
         run: |
           set -e
-          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
-            echo "android-37 不可用，library 模块降到 36"
-            sdkmanager "platforms;android-36"
+          echo "android.ndkVersion=29.0.14206865" >> gradle.properties
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          if [ ! -d "$SDK/platforms/android-37" ]; then
+            echo "android-37 缺失，library 模块 compileSdk 降到 36"
+            "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" || true
             sed -i 's/compileSdk = 37/compileSdk = 36/' \
               build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt
-            grep -n "compileSdk" build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt
-          else
-            echo "android-37 已就位"
           fi
-          echo "android.ndkVersion=29.0.14206865" >> gradle.properties
+          grep -n "compileSdk" build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt || true
 
       - name: Apply armor patch
         run: |
