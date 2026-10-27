@@ -90,6 +90,20 @@ jobs:
           grep -n "ArmorTransformer" app/src/main/java/me/rerere/rikkahub/data/ai/ChatRequestFactory.kt
           grep -n "ArmorProvider" app/src/main/java/me/rerere/rikkahub/service/ChatService.kt
 
+      # web 模块的 preBuild 会调 web-ui 的 `pnpm run build`，runner 没装 pnpm
+      - name: Setup Node and pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install web-ui dependencies
+        working-directory: web-ui
+        run: |
+          set -e
+          npm i -g pnpm@9
+          pnpm --version
+          pnpm install --frozen-lockfile
+
       - name: Build debug APK
         run: |
           set -e
