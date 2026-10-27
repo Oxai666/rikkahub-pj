@@ -69,6 +69,16 @@ jobs:
           fi
           grep -n "compileSdk" build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt || true
 
+      # 上游仓库不含 google-services.json（属于作者私有 Firebase 配置），
+      # 用一个最小占位让 google-services 插件能生成资源；运行期 analytics 静默失败，不影响主功能。
+      - name: Stub google-services.json
+        run: |
+          set -e
+          mkdir -p app/src/github
+          echo '{"project_info":{"project_number":"123456789000","project_id":"rikkahub-local","storage_bucket":"rikkahub-local.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789000:android:0123456789abcdef","android_client_info":{"package_name":"me.rerere.rikkahub"}},"oauth_client":[],"api_key":[{"current_key":"AIzaSyDummyKeyForLocalBuild000000000000"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}],"configuration_version":"1"}' > app/google-services.json
+          cp app/google-services.json app/src/github/google-services.json
+          ls -l app/google-services.json app/src/github/google-services.json
+
       - name: Apply armor patch
         run: |
           set -e
