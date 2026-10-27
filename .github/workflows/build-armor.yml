@@ -1,13 +1,5 @@
 name: build-armor-apk
 
-# 用法（全程手机可完成）：
-#   1. 仓库根目录放 armor-ci.tar.gz（4 个 .kt + patch.py）
-#   2. 把本文件放到 .github/workflows/build-armor.yml
-#   3. Actions → build-armor-apk → Run workflow → 等 20~40 分钟 → 下载 artifact
-#
-# 本 workflow 自己会去上游拉 3.1.1 的源码，不依赖你 fork 里有没有那个 tag，
-# 所以 fork 时勾「Copy the master branch only」也没问题。
-
 on:
   workflow_dispatch:
 
@@ -38,30 +30,58 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      # runner 预装了 Android SDK，但 cmdline-tools 不在 PATH 里；
+      # 找不到就自己下 commandlinetools，保证 sdkmanager 一定存在。
       - name: Install Android SDK components
         run: |
-          set -e
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          set -euo pipefail
 
-          # build-logic 里 compileSdk = 37，平台包必须有
-          sdkmanager "platforms;android-37"
+          SDKM=""
+          SDK_ROOT=""
+          for root in /usr/local/lib/android/sdk /opt/android-sdk "${ANDROID_SDK_ROOT:-}" "${ANDROID_HOME:-}"; do
+            [ -n "$root" ] || continue
+            if [ -x "$root/cmdline-tools/latest/bin/sdkmanager" ]; then
+              SDKM="$root/cmdline-tools/latest/bin/sdkmanager"
+              SDK_ROOT="$root"
+              break
+            fi
+          done
 
-          # build-tools 取能装到的最新 37.x
-          BT=$(sdkmanager --list 2>/dev/null | grep -oE "build-tools;3[7-9][0-9]*\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1)
+          if [ -z "$SDKM" ]; then
+            echo "no sdkmanager on runner, downloading commandlinetools..."
+            SDK_ROOT="$HOME/android-sdk"
+            mkdir -p "$SDK_ROOT/cmdline-tools"
+            curl -fsSL --retry 3 -o /tmp/cmdtools.zip \
+              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdtools.zip -d "$SDK_ROOT/cmdline-tools"
+            mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+            SDKM="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          echo "SDK_ROOT=$SDK_ROOT"
+          echo "SDKM=$SDKM"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+          # yes 会被 SIGPIPE，pipefail 下返回 141，必须吞掉
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+
+          "$SDKM" "platforms;android-37"
+
+          BT=$("$SDKM" --list 2>/dev/null | grep -oE "build-tools;3[7-9][0-9]*\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1 || true)
           if [ -z "$BT" ]; then
-            BT=$(sdkmanager --list 2>/dev/null | grep -oE "build-tools;3[0-9]\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1)
+            BT=$("$SDKM" --list 2>/dev/null | grep -oE "build-tools;3[0-9]\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1 || true)
           fi
           echo "build-tools => $BT"
-          sdkmanager "build-tools;$BT"
+          "$SDKM" "build-tools;$BT"
 
-          # terminal / workspace 两个模块声明了 cmake 3.22.1
-          sdkmanager "cmake;3.22.1"
+          "$SDKM" "cmake;3.22.1"
 
-          # NDK 取最新可用版本并写进 gradle.properties，
-          # 否则 AGP 会去找一个没安装的默认版本
-          NDK=$(sdkmanager --list 2>/dev/null | grep -oE "ndk;[0-9.]+" | sed 's/ndk;//' | sort -V | tail -1)
+          NDK=$("$SDKM" --list 2>/dev/null | grep -oE "ndk;[0-9.]+" | sed 's/ndk;//' | sort -V | tail -1 || true)
           echo "ndk => $NDK"
-          sdkmanager "ndk;$NDK"
+          "$SDKM" "ndk;$NDK"
           echo "android.ndkVersion=$NDK" >> gradle.properties
 
       - name: Apply armor patch
