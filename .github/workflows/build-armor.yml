@@ -10,7 +10,7 @@ jobs:
 
     steps:
       - name: Checkout upstream 3.1.1
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: rikkahub/rikkahub
           ref: 3.1.1
@@ -22,67 +22,45 @@ jobs:
           echo "fetch $URL"
           curl -fsSL --retry 3 --retry-delay 3 -o /tmp/armor-ci.tar.gz "$URL"
           ls -l /tmp/armor-ci.tar.gz
-          tar tzf /tmp/armor-ci.tar.gz
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
-      # runner 预装了 Android SDK，但 cmdline-tools 不在 PATH 里；
-      # 找不到就自己下 commandlinetools，保证 sdkmanager 一定存在。
-      - name: Install Android SDK components
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          log-accepted-android-sdk-licenses: true
+
+      # app 模块：compileSdk { version = release(37) { minorApiLevel = 2 } } → platforms;android-37.2
+      # library 模块：compileSdk = 37 → 需要 platforms;android-37（canary，得用 --channel=3）
+      - name: Install SDK packages
         run: |
-          set -euo pipefail
+          set -x
+          sdkmanager "platforms;android-37.2"
+          sdkmanager "build-tools;37.0.0"
+          sdkmanager "cmake;3.22.1"
+          sdkmanager "ndk;29.0.14206865"
+          sdkmanager --channel=3 "platforms;android-37" || true
+          echo "--- platforms 目录 ---"
+          ls "$ANDROID_SDK_ROOT/platforms" || true
 
-          SDKM=""
-          SDK_ROOT=""
-          for root in /usr/local/lib/android/sdk /opt/android-sdk "${ANDROID_SDK_ROOT:-}" "${ANDROID_HOME:-}"; do
-            [ -n "$root" ] || continue
-            if [ -x "$root/cmdline-tools/latest/bin/sdkmanager" ]; then
-              SDKM="$root/cmdline-tools/latest/bin/sdkmanager"
-              SDK_ROOT="$root"
-              break
-            fi
-          done
-
-          if [ -z "$SDKM" ]; then
-            echo "no sdkmanager on runner, downloading commandlinetools..."
-            SDK_ROOT="$HOME/android-sdk"
-            mkdir -p "$SDK_ROOT/cmdline-tools"
-            curl -fsSL --retry 3 -o /tmp/cmdtools.zip \
-              https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
-            unzip -q /tmp/cmdtools.zip -d "$SDK_ROOT/cmdline-tools"
-            mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
-            SDKM="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+      # canary 平台装不上时，把 library 模块的 compileSdk 降到 36，保证能编
+      - name: Fallback for library compileSdk
+        run: |
+          set -e
+          if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-37" ]; then
+            echo "android-37 不可用，library 模块降到 36"
+            sdkmanager "platforms;android-36"
+            sed -i 's/compileSdk = 37/compileSdk = 36/' \
+              build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt
+            grep -n "compileSdk" build-logic/src/main/kotlin/AndroidLibraryConventionPlugin.kt
+          else
+            echo "android-37 已就位"
           fi
-
-          echo "SDK_ROOT=$SDK_ROOT"
-          echo "SDKM=$SDKM"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "$SDK_ROOT/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
-
-          # yes 会被 SIGPIPE，pipefail 下返回 141，必须吞掉
-          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
-
-          "$SDKM" "platforms;android-37"
-
-          BT=$("$SDKM" --list 2>/dev/null | grep -oE "build-tools;3[7-9][0-9]*\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1 || true)
-          if [ -z "$BT" ]; then
-            BT=$("$SDKM" --list 2>/dev/null | grep -oE "build-tools;3[0-9]\.[0-9.]+" | sed 's/build-tools;//' | sort -V | tail -1 || true)
-          fi
-          echo "build-tools => $BT"
-          "$SDKM" "build-tools;$BT"
-
-          "$SDKM" "cmake;3.22.1"
-
-          NDK=$("$SDKM" --list 2>/dev/null | grep -oE "ndk;[0-9.]+" | sed 's/ndk;//' | sort -V | tail -1 || true)
-          echo "ndk => $NDK"
-          "$SDKM" "ndk;$NDK"
-          echo "android.ndkVersion=$NDK" >> gradle.properties
+          echo "android.ndkVersion=29.0.14206865" >> gradle.properties
 
       - name: Apply armor patch
         run: |
