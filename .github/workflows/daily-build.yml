@@ -1,10 +1,10 @@
 name: Daily Build
 
 on:
-  # 每天 UTC 09:00、18:00 触发（北京时间 17:00、次日 02:00）
-  schedule:
-    - cron: '0 9,18 * * *'
-  # 也支持手动触发
+  # 定时触发已关闭。
+  # 原因：本仓库未配置 KEY_BASE64 / SIGNING_CONFIG / GOOGLE_SERVICES_JSON 三个 secrets，
+  # 每日自动 build 必然在 Prepare build files 步骤失败，每天产生两次失败通知并白烧额度。
+  # 需要时手动触发即可（触发前先配好上述 secrets）。
   workflow_dispatch:
 
 jobs:
