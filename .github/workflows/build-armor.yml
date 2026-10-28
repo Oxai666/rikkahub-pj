@@ -1,33 +1,78 @@
 name: build-armor-apk
 
+# 改动说明（相对旧版）：
+#   1. 上游版本改成可输入参数 upstream_ref，默认仍是 3.1.1 —— 升级只填个 tag，不用改文件
+#   2. armor 包不再走 raw.githubusercontent，改成 checkout 本仓库取 —— 私有仓库也能用，
+#      且取的是「触发这次构建的那个 commit」的包，不会和分支 tip 错位
+#   3. Release 发布改成可选开关，默认关闭 —— 安装包编完下载到本地，不留在 GitHub 上
+#   4. 加 gradle 缓存、上游 commit 记录、armor 包 sha256 记录
 on:
   workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: '上游 rikkahub/rikkahub 的 tag / 分支 / commit'
+        required: false
+        default: '3.1.1'
+        type: string
+      publish_release:
+        description: '编完是否挂到 Release（默认 false：包只下载到本地，不留在 GitHub）'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: armor-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    env:
+      UPSTREAM_REF: ${{ inputs.upstream_ref || '3.1.1' }}
 
     steps:
-      - name: Checkout upstream 3.1.1
+      # ---- 先取自己的 armor 包（私有仓库可用，不依赖 raw CDN）----
+      - name: Checkout armor payload (this repo)
+        uses: actions/checkout@v5
+        with:
+          path: armor-src
+
+      - name: Stage armor payload
+        run: |
+          set -e
+          cp armor-src/armor-ci.tar.gz /tmp/armor-ci.tar.gz
+          ls -lh /tmp/armor-ci.tar.gz
+          sha256sum /tmp/armor-ci.tar.gz | tee /tmp/armor.sha256
+
+      # ---- 上游源码（版本由 upstream_ref 决定）----
+      - name: Checkout upstream
         uses: actions/checkout@v5
         with:
           repository: rikkahub/rikkahub
-          ref: 3.1.1
+          ref: ${{ inputs.upstream_ref || '3.1.1' }}
+          path: .
+          clean: false
           submodules: recursive
 
-      - name: Fetch armor payload from this fork
+      - name: Record upstream revision
         run: |
           set -e
-          URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.ref_name }}/armor-ci.tar.gz"
-          curl -fsSL --retry 3 --retry-delay 3 -o /tmp/armor-ci.tar.gz "$URL"
-          ls -l /tmp/armor-ci.tar.gz
+          COMMIT="$(git rev-parse HEAD)"
+          echo "UPSTREAM_COMMIT=$COMMIT" >> "$GITHUB_ENV"
+          echo "上游 ref: $UPSTREAM_REF"
+          echo "上游 commit: $COMMIT"
+          git log -1 --format='%h %ad %s' --date=short
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
+          cache: gradle
 
       - name: Install SDK packages
         run: |
@@ -70,7 +115,7 @@ jobs:
         run: |
           set -e
           mkdir -p app/src/github
-          echo '{"project_info":{"project_number":"123456789000","project_id":"rikkahub-local","storage_bucket":"rikkahub-local.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789000:android:0123456789abcdef","android_client_info":{"package_name":"me.rerere.rikkahub"}},"oauth_client":[],"api_key":[{"current_key":"AIzaSyDummyKeyForLocalBuild000000000000"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}},{"client_info":{"mobilesdk_app_id":"1:123456789000:android:0123456789abcdee","android_client_info":{"package_name":"me.rerere.rikkahub.debug"}},"oauth_client":[],"api_key":[{"current_key":"AIzaSyDummyKeyForLocalBuild000000000001"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}],"configuration_version":"1"}' > app/google-services.json
+          echo '{"project_info":{"project_number":"123456789000","project_id":"rikkahub-local","storage_bucket":"rikkahub-local.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789000:android:0123456789abcdef","android_client_info":{"package_name":"me.rerere.rikkahub"}},"oauth_client":[],"api_key":[{"current_key":"[REDACTED]"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}},{"client_info":{"mobilesdk_app_id":"1:123456789000:android:0123456789abcdee","android_client_info":{"package_name":"me.rerere.rikkahub.debug"}},"oauth_client":[],"api_key":[{"current_key":"[REDACTED]"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}],"configuration_version":"1"}' > app/google-services.json
           cp app/google-services.json app/src/github/google-services.json
           ls -l app/google-services.json app/src/github/google-services.json
 
@@ -139,7 +184,7 @@ jobs:
           name: armor-test-report
           path: app/build/reports/tests/testGithubDebugUnitTest/
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
 
       - name: Build debug APK
         run: |
@@ -151,10 +196,66 @@ jobs:
             --stacktrace \
             --warning-mode summary
 
-      - name: Upload APK
+      # ---- 产物改名：带上游版本 + 时间戳，下载下来能分清是哪一个 ----
+      - name: Package APK
+        id: pkg
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%d-%H%M)"
+          OUT="rikkahub-armor-${UPSTREAM_REF}-${STAMP}"
+          mkdir -p dist
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/github/debug/*.apk)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "::error::没有找到 APK"
+            exit 1
+          fi
+          for f in "${apks[@]}"; do
+            cp "$f" "dist/${OUT}-$(basename "$f")"
+          done
+          ls -lh dist/
+          {
+            echo "stamp=${STAMP}"
+            echo "out=${OUT}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: rikkahub-armor-debug
           path: app/build/outputs/apk/github/debug/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      # ---- 挂 Release：永久保存，不过期 ----
+      - name: Publish release
+        if: success() && inputs.publish_release != false
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: armor-${{ steps.pkg.outputs.stamp }}
+          TITLE: ${{ steps.pkg.outputs.out }}
+        run: |
+          set -euo pipefail
+          {
+            echo "**upstream**: \`${UPSTREAM_REF}\` (\`${UPSTREAM_COMMIT}\`)"
+            echo ""
+            echo "**armor payload**: \`$(cat /tmp/armor.sha256)\`"
+            echo ""
+            echo "**triggering commit**: \`${GITHUB_SHA}\`"
+            echo ""
+            echo "APK 为 debug 签名，自用。"
+          } > /tmp/notes.md
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG 已存在，覆盖附件"
+            gh release upload "$TAG" dist/*.apk --clobber
+          else
+            gh release create "$TAG" dist/*.apk \
+              --title "$TITLE" \
+              --prerelease \
+              --notes-file /tmp/notes.md
+          fi
+          echo "已发布: $TAG"
