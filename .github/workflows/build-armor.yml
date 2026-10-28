@@ -6,6 +6,7 @@ name: build-armor-apk
 #      且取的是「触发这次构建的那个 commit」的包，不会和分支 tip 错位
 #   3. Release 发布改成可选开关，默认关闭 —— 安装包编完下载到本地，不留在 GitHub 上
 #   4. 加 gradle 缓存、上游 commit 记录、armor 包 sha256 记录
+#   5. 锁 ubuntu-24.04（避开 ubuntu-latest 迁 Ubuntu 26），action 升到 node24 版消警告
 on:
   workflow_dispatch:
     inputs:
@@ -29,7 +30,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
       UPSTREAM_REF: ${{ inputs.upstream_ref || '3.1.1' }}
@@ -147,12 +148,12 @@ jobs:
           ls -l "$TEST_DIR" || true
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
         with:
           version: 11
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -179,7 +180,7 @@ jobs:
 
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: armor-test-report
           path: app/build/reports/tests/testGithubDebugUnitTest/
@@ -222,7 +223,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: rikkahub-armor-debug
           path: app/build/outputs/apk/github/debug/*.apk
